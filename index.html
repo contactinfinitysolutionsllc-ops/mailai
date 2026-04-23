@@ -268,6 +268,7 @@ footer a{color:var(--accent2);text-decoration:none}
       <div class="pay-row total"><span class="lbl">Total</span><span class="val" id="pay-amt">—</span></div>
     </div>
     <button class="btn btn-p" id="pay-btn" onclick="handlePay()">Pay Securely with Square →</button>
+    <div id="pay-error" style="display:none;margin-top:.8rem;padding:.7rem 1rem;background:rgba(255,107,107,.08);border:1px solid rgba(255,107,107,.25);border-radius:10px;font-size:.82rem;color:#ff6b6b;"></div>
     <p class="secure-note"><span>🔒 Secured by Square</span> · Instant access after payment</p>
   </div>
 
@@ -285,8 +286,10 @@ footer a{color:var(--accent2);text-decoration:none}
     <div class="email-output-wrap show" id="email-output">
       <div id="email-cards"></div>
     </div>
-    <div style="display:flex;gap:8px;margin-top:1rem">
-      <button class="btn-copy" style="flex:1" onclick="copyAll(this)">📋 Copy all emails</button>
+    <div id="gen-error" style="display:none;margin-top:.8rem;padding:.7rem 1rem;background:rgba(255,107,107,.08);border:1px solid rgba(255,107,107,.25);border-radius:10px;font-size:.82rem;color:#ff6b6b;">Something went wrong generating your emails. Please try again.</div>
+    <div style="display:flex;gap:8px;margin-top:1rem;flex-wrap:wrap">
+      <button class="btn-copy" style="flex:1" onclick="copyAll(this)">📋 Copy all</button>
+      <button class="btn-copy" style="flex:1" onclick="downloadAll()">⬇ Download all</button>
       <button class="btn-copy" style="flex:1" onclick="location.reload()">← Start over</button>
     </div>
   </div>
@@ -306,7 +309,10 @@ footer a{color:var(--accent2);text-decoration:none}
 
 <script>
 const WORKER_URL = 'https://justdocs-worker.robertjosephreynolds.workers.dev';
-const APP_NAME   = 'mailai';
+const APP_NAME          = 'mailai';
+const APP_URL           = 'https://contactinfinitysolutionsllc-ops.github.io/mailai/';
+const SQUARE_MONTHLY_URL = 'https://square.link/u/pCpKBYg8'; // replace with Square monthly plan link once created
+const SQUARE_ANNUAL_URL  = 'https://square.link/u/zRrTqrz3'; // replace with Square annual plan link once created
 let selectedType = null, selectedPrice = null, selectedName = null, selectedEmails = 1;
 let subscribedUnlocked = false;
 let allEmailsText = '';
@@ -461,7 +467,7 @@ function goStep2(){
   goStep(2);
 }
 
-function goStep3(){
+async function goStep3(){
   const brand=document.getElementById('f-brand').value.trim();
   const audience=document.getElementById('f-audience').value.trim();
   const product=document.getElementById('f-product').value.trim();
@@ -470,6 +476,11 @@ function goStep3(){
   document.getElementById('pay-type').textContent=selectedName;
   document.getElementById('pay-count').textContent=selectedEmails+' email'+(selectedEmails>1?'s':'');
   document.getElementById('pay-amt').textContent='$'+parseFloat(selectedPrice).toFixed(2);
+  // Update pay button label for subscribers
+  const sub=subscribedUnlocked||(_subCache===true);
+  const payBtn=document.getElementById('pay-btn');
+  if(sub){ payBtn.textContent='Generate My Emails →'; }
+  else { payBtn.textContent='Pay Securely with Square →'; }
   goStep(3);
 }
 
@@ -480,6 +491,8 @@ let _subCache = null;
 // ── PAYMENT ──────────────────────────────────────────────
 async function handlePay(){
   const btn=document.getElementById('pay-btn');
+  const errEl=document.getElementById('pay-error');
+  if(errEl) errEl.style.display='none';
   const sub=subscribedUnlocked||await isSubscribed();
   if(sub){generateEmails();return;}
   btn.textContent='Creating payment link…';btn.disabled=true;
@@ -495,8 +508,14 @@ async function handlePay(){
         redirectUrl:'https://contactinfinitysolutionsllc-ops.github.io/mailai/?paid=true'})});
     const data=await r.json();
     if(data.url){window.location.href=data.url;}
-    else{btn.textContent='Pay Securely with Square →';btn.disabled=false;alert('Could not create payment link. Please try again.');}
-  }catch{btn.textContent='Pay Securely with Square →';btn.disabled=false;alert('Payment error. Please try again.');}
+    else{
+      btn.textContent='Pay Securely with Square →';btn.disabled=false;
+      if(errEl){errEl.textContent='Could not create payment link. Please try again.';errEl.style.display='block';}
+    }
+  }catch{
+    btn.textContent='Pay Securely with Square →';btn.disabled=false;
+    if(errEl){errEl.textContent='Payment error. Please check your connection and try again.';errEl.style.display='block';}
+  }
 }
 
 // ── GENERATE ─────────────────────────────────────────────
@@ -505,15 +524,23 @@ async function generateEmails(){
   const prompt=buildFullPrompt(selectedType,fd);
   document.getElementById('panel3').classList.remove('active');
   document.getElementById('loading').style.display='block';
+  document.getElementById('gen-error').style.display='none';
   setSteps(4);
   try{
     const r=await fetch(WORKER_URL,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({action:'claude',prompt})});
+      body:JSON.stringify({action:'claude',prompt,email:getStoredSession()?.email||localStorage.getItem('ig_account_email')||''})});
     const data=await r.json();
-    parseAndShowEmails(data.result||'');
+    if(data.result){
+      parseAndShowEmails(data.result);
+    }else{
+      document.getElementById('loading').style.display='none';
+      document.getElementById('panel4').classList.add('active');
+      document.getElementById('gen-error').style.display='block';
+    }
   }catch{
     document.getElementById('loading').style.display='none';
-    alert('Error generating emails. Please try again.');
+    document.getElementById('panel4').classList.add('active');
+    document.getElementById('gen-error').style.display='block';
   }
 }
 
@@ -524,30 +551,37 @@ function parseAndShowEmails(raw){
   const container=document.getElementById('email-cards');
   container.innerHTML='';
 
+  function extractEmailParts(block){
+    // Subject: find label, read to end of line
+    const rawU=block.toUpperCase();
+    const subIdx=rawU.indexOf('SUBJECT:');
+    const prevIdx=rawU.indexOf('PREVIEW:');
+    const bodyIdx=rawU.indexOf('BODY:');
+    const subject=subIdx!==-1
+      ? block.slice(subIdx+8, rawU.indexOf('\n',subIdx)!==-1?rawU.indexOf('\n',subIdx):undefined).trim()
+      : '';
+    const preview=prevIdx!==-1
+      ? block.slice(prevIdx+8, rawU.indexOf('\n',prevIdx)!==-1?rawU.indexOf('\n',prevIdx):undefined).trim()
+      : '';
+    const body=bodyIdx!==-1
+      ? block.slice(bodyIdx+5).replace(/^[\s]+/,'').replace(/\s*---\s*$/,'').trim()
+      : block.trim();
+    return {subject:subject||'Email',preview,body};
+  }
+
   if(selectedEmails===1){
-    // Single email
-    const subjectM=raw.match(/SUBJECT:\s*(.+)/i);
-    const previewM=raw.match(/PREVIEW:\s*(.+)/i);
-    const bodyM=raw.match(/BODY:\s*([\s\S]+)/i);
-    const subject=subjectM?subjectM[1].trim():'Your Email';
-    const preview=previewM?previewM[1].trim():'';
-    const body=bodyM?bodyM[1].trim():raw;
+    const {subject,preview,body}=extractEmailParts(raw);
     container.innerHTML=buildEmailCard(1,subject,preview,body,selectedName);
   }else{
-    // Sequence
-    const emailBlocks=raw.split(/EMAIL\s+\d+:/i).filter(b=>b.trim());
+    // Split on EMAIL N: — handle optional markdown bold (**EMAIL 1:**) and word numbers
+    const emailBlocks=raw.split(/\*{0,2}EMAIL\s+[\dA-Z]+\s*:\*{0,2}/i).filter(b=>b.trim());
     if(emailBlocks.length<=1){
-      // Fallback
-      container.innerHTML=`<div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:1.3rem;font-size:.87rem;line-height:1.85;white-space:pre-wrap;color:var(--muted2)">${raw}</div>`;
+      // Fallback: show raw
+      container.innerHTML=`<div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:1.3rem;font-size:.87rem;line-height:1.85;white-space:pre-wrap;color:var(--muted2)">${raw.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
     }else{
       emailBlocks.forEach((block,i)=>{
-        const subjectM=block.match(/SUBJECT:\s*(.+)/i);
-        const previewM=block.match(/PREVIEW:\s*(.+)/i);
-        const bodyM=block.match(/BODY:\s*([\s\S]+?)(?=---|$)/is);
-        const subject=subjectM?subjectM[1].trim():`Email ${i+1}`;
-        const preview=previewM?previewM[1].trim():'';
-        const body=bodyM?bodyM[1].trim():block;
-        container.insertAdjacentHTML('beforeend',buildEmailCard(i+1,subject,preview,body,`Email ${i+1} of ${emailBlocks.length}`));
+        const {subject,preview,body}=extractEmailParts(block);
+        container.insertAdjacentHTML('beforeend',buildEmailCard(i+1,subject||`Email ${i+1}`,preview,body,`Email ${i+1} of ${emailBlocks.length}`));
       });
     }
   }
@@ -570,6 +604,7 @@ function buildEmailCard(num,subject,preview,body,label){
       <div class="ec-actions">
         <button class="btn-copy" onclick="copyEmail('${id}-text',this)">📋 Copy email</button>
         <button class="btn-copy" onclick="copySubject('${subject}',this)">📋 Copy subject</button>
+        <button class="btn-copy" onclick="downloadEmail('${id}-text','email-${num}')">⬇ Download</button>
       </div>
       <div id="${id}-text" style="display:none">Subject: ${subject}\nPreview: ${preview}\n\n${body}</div>
     </div>
@@ -586,7 +621,24 @@ function copySubject(subject,btn){
   navigator.clipboard.writeText(subject).then(()=>{btn.textContent='✓ Copied!';btn.classList.add('ok');setTimeout(()=>{btn.textContent='📋 Copy subject';btn.classList.remove('ok');},2000);});
 }
 function copyAll(btn){
-  navigator.clipboard.writeText(allEmailsText).then(()=>{btn.textContent='✓ Copied!';btn.classList.add('ok');setTimeout(()=>{btn.textContent='📋 Copy all emails';btn.classList.remove('ok');},2000);});
+  const orig=btn.textContent;
+  navigator.clipboard.writeText(allEmailsText).then(()=>{btn.textContent='✓ Copied!';btn.classList.add('ok');setTimeout(()=>{btn.textContent=orig;btn.classList.remove('ok');},2000);});
+}
+function downloadEmail(textId,filename){
+  const text=document.getElementById(textId)?.textContent||'';
+  if(!text) return;
+  const a=document.createElement('a');
+  a.href='data:text/plain;charset=utf-8,'+encodeURIComponent(text);
+  a.download=filename+'-'+new Date().toISOString().slice(0,10)+'.txt';
+  a.click();
+}
+function downloadAll(){
+  if(!allEmailsText) return;
+  const name=(selectedName||'emails').toLowerCase().replace(/\s+/g,'-');
+  const a=document.createElement('a');
+  a.href='data:text/plain;charset=utf-8,'+encodeURIComponent(allEmailsText);
+  a.download=name+'-'+new Date().toISOString().slice(0,10)+'.txt';
+  a.click();
 }
 
 function goStep(n){
@@ -607,7 +659,8 @@ function setSteps(active){
 
 // ── PAID RETURN ───────────────────────────────────────────
 if(window.location.search.includes('paid=true')){
-  const email=localStorage.getItem('ig_account_email');
+  const email=localStorage.getItem('mail_pending_email')||localStorage.getItem('ig_account_email');
+  const plan='session'; // mailai per-use payments are always session-type
   const type=localStorage.getItem('mail_type');
   const name=localStorage.getItem('mail_name');
   const price=localStorage.getItem('mail_price');
@@ -624,7 +677,7 @@ if(window.location.search.includes('paid=true')){
     });
     if(email){
       fetch(WORKER_URL,{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({action:'addSubscriber',email,app:APP_NAME})
+        body:JSON.stringify({action:'addSubscriber',email,app:APP_NAME,plan})
       }).then(()=>{
         localStorage.setItem('mail_email',email);
         subscribedUnlocked=true;
@@ -740,6 +793,5 @@ async function isSubscribed() {
   }
 })();
 </script>
-<script src="https://contactinfinitysolutionsllc-ops.github.io/account/ig-account.js"></script>
 </body>
 </html>
